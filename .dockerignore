@@ -1,0 +1,9 @@
+.git
+.claude
+.verification-cache
+runner
+evidence
+case_metadata
+cases
+workspaces
+private_oracles
