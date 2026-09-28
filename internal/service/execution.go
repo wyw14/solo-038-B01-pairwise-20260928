@@ -95,17 +95,23 @@ func (runtime *Runtime) feedWebOperation(ctx context.Context, current model.Job)
 	if err != nil {
 		return err
 	}
+	tensionB, err := sensor.DeriveTension(forceB, 10, string(model.NewOperationID()))
+	if err != nil {
+		return err
+	}
 	speed := sensor.Reading{ID: string(model.NewOperationID()), Kind: sensor.ReadingSpeed, Source: "traction-encoder", Origin: "traction-encoder", Value: 8, Unit: "m/s", ObservedAt: now}
 	runtime.sensors.PutReading(forceA)
 	runtime.sensors.PutReading(forceB)
 	runtime.sensors.PutReading(tension)
+	runtime.sensors.PutReading(tensionB)
 	runtime.sensors.PutReading(speed)
 	readings := runtime.sensors.CurrentReadings(now, time.Second)
-	permit, err := runtime.webControl.Permit([]sensor.Reading{forceA, forceB}, runtime.config.RegisterTolerance, now)
+	tensionReadings := []sensor.Reading{tension, tensionB}
+	permit, err := runtime.webControl.Permit(tensionReadings, runtime.config.RegisterTolerance, now)
 	if err != nil {
 		return err
 	}
-	status, err := unwind.EvaluateTension([]sensor.Reading{forceA, forceB}, 2)
+	status, err := unwind.EvaluateTension(tensionReadings, runtime.config.RegisterTolerance)
 	if err != nil {
 		return err
 	}
@@ -268,6 +274,11 @@ func (runtime *Runtime) releaseOperation(current model.Job) error {
 }
 
 func (runtime *Runtime) finishOutputOperation(current model.Job) error {
+	if err := runtime.requireProductionEvidence(current); err != nil {
+		runtime.folderControl.Stop(err.Error())
+		runtime.RecordIncident("warning", "folder", err.Error())
+		return err
+	}
 	if err := runtime.folderControl.Prepare(8, 630); err != nil {
 		return err
 	}
