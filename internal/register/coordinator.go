@@ -68,6 +68,57 @@ func (coordinator *Coordinator) CanAdvance(job model.Job) bool {
 	return ok && record.Released && record.Interval.JobGeneration == job.Generation && coordinator.lastError == nil
 }
 
+// LotEligibility reports why a job's released interval cannot back a finished
+// folder lot, without reserving it.
+func (coordinator *Coordinator) LotEligibility(job model.Job) error {
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	return coordinator.lotEligibilityLocked(job)
+}
+
+func (coordinator *Coordinator) lotEligibilityLocked(job model.Job) error {
+	record, ok := coordinator.released[job.ID]
+	if !ok {
+		return fmt.Errorf("job has not released a paper interval")
+	}
+	if !record.Released {
+		return fmt.Errorf("released interval is not durable")
+	}
+	if record.Interval.JobGeneration != job.Generation {
+		return fmt.Errorf("released interval does not match current job generation")
+	}
+	if record.CompletedLot {
+		return fmt.Errorf("released interval already produced a folder lot")
+	}
+	return nil
+}
+
+// ConsumeReleased reserves the job's released interval for a single completed
+// folder lot. It rejects jobs that never released an interval, intervals from
+// another generation, and intervals that already produced a lot.
+func (coordinator *Coordinator) ConsumeReleased(job model.Job) error {
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if err := coordinator.lotEligibilityLocked(job); err != nil {
+		return err
+	}
+	record := coordinator.released[job.ID]
+	record.CompletedLot = true
+	coordinator.released[job.ID] = record
+	return nil
+}
+
+// ReleaseConsumedLot reverses a reservation when the folder completion fails
+// after the interval was consumed, so the interval stays available for retry.
+func (coordinator *Coordinator) ReleaseConsumedLot(job model.Job) {
+	coordinator.mu.Lock()
+	defer coordinator.mu.Unlock()
+	if record, ok := coordinator.released[job.ID]; ok && record.CompletedLot {
+		record.CompletedLot = false
+		coordinator.released[job.ID] = record
+	}
+}
+
 func (coordinator *Coordinator) LastError() error {
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()

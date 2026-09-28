@@ -268,20 +268,58 @@ func (runtime *Runtime) releaseOperation(current model.Job) error {
 }
 
 func (runtime *Runtime) finishOutputOperation(current model.Job) error {
-	if err := runtime.folderControl.Prepare(8, 630); err != nil {
-		return err
+	// Gate: a roll matching the current job generation must be loaded.
+	if _, rollGeneration, _, _ := runtime.unwind.Snapshot(); rollGeneration == 0 {
+		return runtime.rejectFinishOutput(fmt.Errorf("no roll has been loaded for the job"))
+	} else if rollGeneration != current.RollGeneration {
+		return runtime.rejectFinishOutput(fmt.Errorf("loaded roll generation %d does not match job roll generation %d", rollGeneration, current.RollGeneration))
 	}
-	if err := runtime.folderControl.Finish(); err != nil {
-		return err
+	// Gate: the web must be fenced for this generation, threaded, and actually
+	// advanced — configuration alone is not evidence of production.
+	owner, webJobGeneration, webRollGeneration, threaded, meter := runtime.web.Snapshot()
+	if owner != string(current.ID) || webJobGeneration != current.Generation || webRollGeneration != current.RollGeneration {
+		return runtime.rejectFinishOutput(fmt.Errorf("web fence does not belong to current job generation"))
+	}
+	if !threaded {
+		return runtime.rejectFinishOutput(fmt.Errorf("web has not been threaded"))
+	}
+	if meter <= 0 {
+		return runtime.rejectFinishOutput(fmt.Errorf("paper has not advanced through the press"))
+	}
+	// Gate: exactly one durable released interval from the current generation
+	// backs the lot, and each interval can produce the lot only once.
+	if err := runtime.registerControl.LotEligibility(current); err != nil {
+		return runtime.rejectFinishOutput(fmt.Errorf("no released paper interval is available: %w", err))
 	}
 	output, err := folder.BuildOutput(current, 500, time.Now())
 	if err != nil {
-		return err
+		return runtime.rejectFinishOutput(err)
 	}
 	if !output.BelongsTo(current) {
-		return fmt.Errorf("folder output generation mismatch")
+		return runtime.rejectFinishOutput(fmt.Errorf("folder output generation mismatch"))
+	}
+	if err := runtime.folderControl.Prepare(8, 630); err != nil {
+		return runtime.rejectFinishOutput(err)
+	}
+	if err := runtime.registerControl.ConsumeReleased(current); err != nil {
+		return runtime.rejectFinishOutput(fmt.Errorf("no released paper interval is available: %w", err))
+	}
+	if err := runtime.folderControl.Finish(); err != nil {
+		// The lot was not counted, so release the interval for a retry.
+		runtime.registerControl.ReleaseConsumedLot(current)
+		return runtime.rejectFinishOutput(err)
 	}
 	return nil
+}
+
+// rejectFinishOutput parks the folder in a faulted, not-ready state and records
+// why the finish_output operation was refused, so no lot is counted and the
+// rejection reason remains visible to operators.
+func (runtime *Runtime) rejectFinishOutput(cause error) error {
+	reason := "finish output rejected: " + cause.Error()
+	runtime.folderControl.Stop(reason)
+	runtime.RecordIncident("warning", "folder", reason)
+	return fmt.Errorf("%s", reason)
 }
 
 func (runtime *Runtime) spliceOperation(ctx context.Context, current model.Job) error {

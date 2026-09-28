@@ -8,9 +8,10 @@ import (
 )
 
 type IntervalRecord struct {
-	Interval model.Interval `json:"interval"`
-	Proofs   []model.Proof  `json:"proofs"`
-	Released bool           `json:"released"`
+	Interval     model.Interval `json:"interval"`
+	Proofs       []model.Proof  `json:"proofs"`
+	Released     bool           `json:"released"`
+	CompletedLot bool           `json:"completed_lot"`
 }
 
 func PersistInterval(store *Store, job model.Job, operation model.OperationID, record IntervalRecord, now time.Time) (uint64, error) {
